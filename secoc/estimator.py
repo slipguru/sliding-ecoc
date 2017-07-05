@@ -40,7 +40,7 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
                  window_size=5, stride=1,
                  # code_size=,  # division on the number of classes
                  oob_score=False,
-                 max_features=None,
+                 max_features=None, verbose=False,
                  random_state=None, n_jobs=1):
 
         super(SlidingECOC, self).__init__(
@@ -56,6 +56,7 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
         self.max_features = max_features
         self.random_state = random_state
         self.n_jobs = n_jobs
+        self.verbose = verbose
 
     def fit(self, X, y):
         """Fit underlying estimators.
@@ -106,7 +107,12 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
         #               for i in range(X.shape[0])], dtype=np.int)
 
         # How many windows I have?
-        # f = lambda p,d,k,s: p*(np.ceil((d-k)/s) + 1)
+        n_windows_ = np.ceil((n_features - self.window_size) / self.stride) + 1
+        if self.verbose:
+            print("You are about to generate {0} estimators for {1} windows, "
+                  "for a total of {2} estimators.".format(
+                      self.n_estimators, n_windows_,
+                      self.n_estimators * n_windows_))
 
         # sliding window
         self.estimator_features_ = []

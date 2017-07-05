@@ -37,7 +37,7 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
     def __init__(self, base_estimator=None,
                  n_estimators=50,
                  estimator_params=tuple(),  # ?
-                 window_size=5,
+                 window_size=5, stride=1,
                  # code_size=,  # division on the number of classes
                  oob_score=False,
                  max_features=None,
@@ -51,6 +51,7 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
         # self.base_estimator = base_estimator
         # self.code_size = code_size
         self.window_size = window_size
+        self.stride = stride
         self.oob_score = oob_score
         self.max_features = max_features
         self.random_state = random_state
@@ -85,7 +86,7 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
 
         self.classes_ = np.unique(y)
         n_classes = self.classes_.shape[0]
-        code_size_ = int(n_classes * self.code_size)
+        # code_size_ = int(n_classes * self.code_size)
 
         n_samples, n_features = X.shape
 
@@ -104,32 +105,48 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
         # Y = np.array([self.code_book_[classes_index[y[i]]]
         #               for i in range(X.shape[0])], dtype=np.int)
 
+        # How many windows I have?
+        # f = lambda p,d,k,s: p*(np.ceil((d-k)/s) + 1)
+
         # sliding window
         self.estimator_features_ = []
-        for start in range(n_features):
+        self.estimator_splits_ = []
+        for start in range(0, n_features - self.window_size + 1 + (
+                n_features - self.window_size) % self.stride, self.stride):
             features = []
             y_binary_splits = []
             for p in range(self.n_estimators):
                 # prepare the features
                 # 1. choose randomly the max features belonging to [0, k-1]
                 # 1a. how many?
-                n_features_window = np.random.randint(0, self.max_features)
+                n_features_window = np.random.randint(1, min(
+                    self.max_features, n_features - start - 1))
                 # 1b. which ones?
-                features.append(
-                    np.random.randint(0, self.window_size, n_features_window)
-                    + start)
+                features.append(np.random.randint(
+                    start,
+                    min(start + self.window_size, n_features),
+                    n_features_window))
 
                 # 2. split y and binarise it
                 y_binary_splits.append(random_binarizer(y))
 
-            self.estimators_ = jl.Parallel(n_jobs=self.n_jobs)(
+            self.estimators_.extend(jl.Parallel(n_jobs=self.n_jobs)(
                 jl.delayed(_fit_binary)(
                     self.base_estimator, X[:, feats], y_binary)
-                for feats, y_binary in zip(features, y_binary_splits))
+                for feats, y_binary in zip(features, y_binary_splits)))
             self.estimator_features_.extend(features)
             self.estimator_splits_.extend(y_binary_splits)
 
         return self
+
+    def encode(self, X):
+        check_is_fitted(self, 'estimators_')
+
+        return np.array([estimator.predict(X[:, feats]) for estimator, feats in zip(
+            self.estimators_, self.estimator_features_)]).T
+
+
+
 
     def predict(self, X):
         """Predict multi-class targets using underlying estimators.

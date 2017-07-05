@@ -13,6 +13,7 @@ from sklearn.ensemble.base import BaseEnsemble
 from sklearn.externals import joblib as jl
 from sklearn.externals.six.moves import zip as izip
 from sklearn.multiclass import _check_estimator, _fit_binary, _predict_binary
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import LabelBinarizer
 from sklearn.utils import check_random_state
 from sklearn.utils.validation import check_is_fitted
@@ -107,7 +108,7 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
         #               for i in range(X.shape[0])], dtype=np.int)
 
         # How many windows I have?
-        n_windows_ = np.ceil((n_features - self.window_size) / self.stride) + 1
+        n_windows_ = int(np.ceil((n_features - self.window_size) / self.stride) + 1)
         if self.verbose:
             print("You are about to generate {0} estimators for {1} windows, "
                   "for a total of {2} estimators.".format(
@@ -143,6 +144,8 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
             self.estimator_features_.extend(features)
             self.estimator_splits_.extend(y_binary_splits)
 
+        self.X_train_encoding_ = self.encode(X)
+        self.y_train_ = y
         return self
 
     def encode(self, X):
@@ -150,9 +153,6 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
 
         return np.array([estimator.predict(X[:, feats]) for estimator, feats in zip(
             self.estimators_, self.estimator_features_)]).T
-
-
-
 
     def predict(self, X):
         """Predict multi-class targets using underlying estimators.
@@ -167,7 +167,8 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
         y : numpy array of shape [n_samples]
             Predicted multi-class targets.
         """
-        check_is_fitted(self, 'estimators_')
-        # Y = np.array([_predict_binary(e, X) for e in self.estimators_]).T
+        X_encoding_ = self.encode(X)
         # pred = euclidean_distances(Y, self.code_book_).argmin(axis=1)
-        # return self.classes_[pred]
+        knn = KNeighborsClassifier(n_neighbors=3).fit(
+            self.X_train_encoding_, self.y_train_)
+        return knn.predict(X_encoding_)

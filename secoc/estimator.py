@@ -154,7 +154,7 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
         return np.array([estimator.predict(X[:, feats]) for estimator, feats in zip(
             self.estimators_, self.estimator_features_)]).T
 
-    def predict(self, X):
+    def predict(self, X, classifier=None):
         """Predict multi-class targets using underlying estimators.
 
         Parameters
@@ -169,6 +169,8 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
         """
         X_encoding_ = self.encode(X)
         # pred = euclidean_distances(Y, self.code_book_).argmin(axis=1)
-        knn = KNeighborsClassifier(n_neighbors=3).fit(
+        if classifier is None:
+            classifier = KNeighborsClassifier()
+        knn = classifier.fit(
             self.X_train_encoding_, self.y_train_)
         return knn.predict(X_encoding_)

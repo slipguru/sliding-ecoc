@@ -2,6 +2,7 @@
 
 import array
 import numpy as np
+import numbers
 import scipy.sparse as sp
 import warnings
 import itertools
@@ -14,7 +15,7 @@ from sklearn.externals.six.moves import zip as izip
 from sklearn.multiclass import _check_estimator, _fit_binary, _predict_binary
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import LabelBinarizer
-from sklearn.utils import check_random_state
+from sklearn.utils import check_random_state, check_X_y
 from sklearn.utils.validation import check_is_fitted
 
 from sklearn.metrics.pairwise import euclidean_distances
@@ -22,6 +23,100 @@ from sklearn.utils.multiclass import (_check_partial_fit_first_call,
                                       check_classification_targets,
                                       _ovr_decision_function)
 from sklearn.utils.metaestimators import _safe_split
+from sklearn.ensemble.forest import _generate_sample_indices
+from sklearn.ensemble.forest import _generate_unsampled_indices
+from sklearn.ensemble.bagging import _generate_indices
+from sklearn.ensemble.bagging import BaseBagging
+from sklearn.ensemble.base import _partition_estimators
+from sklearn.utils import indices_to_mask
+from sklearn.utils.fixes import bincount
+from sklearn.utils.validation import has_fit_parameter, check_is_fitted
+
+MAX_INT = np.iinfo(np.int32).max
+
+
+def _generate_feature_window_start(n_estimators_window, n_features, window_size,
+                                   stride):
+    for start in range(0, n_features - window_size + 1 + (
+            n_features - window_size) % stride, stride):
+        for i in range(n_estimators_window):
+            yield start
+
+
+def _generate_bagging_indices(random_state, bootstrap_features,
+                              bootstrap_samples, n_features, n_samples,
+                              max_features, max_samples):
+    """Randomly draw feature and sample indices."""
+    # Get valid random state
+    random_state = check_random_state(random_state)
+
+    # Draw indices
+    feature_indices = _generate_indices(random_state, bootstrap_features,
+                                        n_features, max_features)
+    sample_indices = _generate_indices(random_state, bootstrap_samples,
+                                       n_samples, max_samples)
+
+    return feature_indices, sample_indices
+
+
+def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
+                               seeds, total_n_estimators, verbose):
+    """Private function used to build a batch of estimators within a job."""
+    # Retrieve settings
+    n_samples, n_features = X.shape
+    max_features = ensemble._max_features
+    max_samples = ensemble._max_samples
+    bootstrap = ensemble.bootstrap
+    bootstrap_features = ensemble.bootstrap_features
+    support_sample_weight = has_fit_parameter(ensemble.base_estimator_,
+                                              "sample_weight")
+    if not support_sample_weight and sample_weight is not None:
+        raise ValueError("The base estimator doesn't support sample weight")
+
+    # Build estimators
+    estimators = []
+    estimators_features = []
+
+    for i in range(n_estimators):
+        if verbose > 1:
+            print("Building estimator %d of %d for this parallel run (total %d)..." %
+                  (i + 1, n_estimators, total_n_estimators))
+
+        random_state = np.random.RandomState(seeds[i])
+        estimator = ensemble._make_estimator(append=False,
+                                             random_state=random_state)
+
+        # Draw random feature, sample indices
+        features, indices = _generate_bagging_indices(random_state,
+                                                      bootstrap_features,
+                                                      bootstrap, n_features,
+                                                      n_samples, max_features,
+                                                      max_samples)
+
+        # Draw samples, using sample weights, and then fit
+        if support_sample_weight:
+            if sample_weight is None:
+                curr_sample_weight = np.ones((n_samples,))
+            else:
+                curr_sample_weight = sample_weight.copy()
+
+            if bootstrap:
+                sample_counts = bincount(indices, minlength=n_samples)
+                curr_sample_weight *= sample_counts
+            else:
+                not_indices_mask = ~indices_to_mask(indices, n_samples)
+                curr_sample_weight[not_indices_mask] = 0
+
+            estimator.fit(X[:, features], y, sample_weight=curr_sample_weight)
+
+        # Draw samples, using a mask, and then fit
+        else:
+            estimator.fit((X[indices])[:, features], y[indices])
+
+        estimators.append(estimator)
+        estimators_features.append(features)
+
+    return estimators, estimators_features
 
 
 def random_binarizer(y):
@@ -31,10 +126,14 @@ def random_binarizer(y):
     xx = unique[:np.random.randint(1, unique.size - 1)]
     return reduce(np.logical_or, [np.array(y) == x for x in xx]).astype(int)
 
-def _fit_binary_oob(estimator, X, y):
-    return _fit_binary(estimator, X, y)
 
-class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
+def _fit_binary_oob(estimator, X, y):
+    indices = _generate_sample_indices(estimator.random_state, n_samples)
+    fitted_estimator = _fit_binary(estimator, X[indices], y[indices])
+    return None
+
+
+class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
     """A SlidingECOC classifier.
 
     A SlidingECOC classifier is an ensemble meta-estimator specifically
@@ -150,43 +249,172 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
 
     def __init__(self, base_estimator=None,
                  n_estimators=50,
-                 estimator_params=tuple(),  # ?
-                 window_size=5, stride=1,
-                 code_size='auto',
+                 max_samples=1.0,
+                 max_features=1.0,
+                 bootstrap=True,
+                 bootstrap_features=False,
                  oob_score=False,
-                 max_features=None, verbose=False,
-                 random_state=None, n_jobs=1):
+                 n_jobs=1,
+                 random_state=None,
+                 verbose=0,
+
+                 window_size=5,
+                 stride=1,
+                 code_size='auto'):
 
         super(SlidingECOC, self).__init__(
             base_estimator=base_estimator,
             n_estimators=n_estimators,
-            estimator_params=estimator_params)
+            max_samples=max_samples,
+            max_features=max_features,
+            bootstrap=bootstrap,
+            bootstrap_features=bootstrap_features,
+            oob_score=oob_score,
+            n_jobs=n_jobs,
+            random_state=random_state,
+            verbose=verbose)
 
-        # self.base_estimator = base_estimator
-        # self.code_size = code_size
         self.window_size = window_size
         self.stride = stride
-        self.oob_score = oob_score
-        self.max_features = max_features
-        self.random_state = random_state
-        self.n_jobs = n_jobs
-        self.verbose = verbose
+        self.code_size = code_size
 
-    def fit(self, X, y):
-        """Fit underlying estimators.
+    def _fit(self, X, y, max_samples=None, max_depth=None, sample_weight=None):
+        """Build an ensemble of estimators from the training
+           set (X, y) using a sliding window.
 
         Parameters
         ----------
-        X : (sparse) array-like, shape = [n_samples, n_features]
-            Data.
+        X : {array-like, sparse matrix} of shape = [n_samples, n_features]
+            The training input samples. Sparse matrices are accepted only if
+            they are supported by the base estimator.
 
-        y : numpy array of shape [n_samples]
-            Multi-class targets.
+        y : array-like, shape = [n_samples]
+            The target values (class labels in classification, real numbers in
+            regression).
+
+        max_samples : int or float, optional (default=None)
+            Argument to use instead of self.max_samples.
+
+        max_depth : int, optional (default=None)
+            Override value used when constructing base estimator. Only
+            supported if the base estimator has a max_depth parameter.
+
+        sample_weight : array-like, shape = [n_samples] or None
+            Sample weights. If None, then samples are equally weighted.
+            Note that this is supported only if the base estimator supports
+            sample weighting.
 
         Returns
         -------
-        self
+        self : object
+            Returns self.
         """
+        random_state = check_random_state(self.random_state)
+
+        # Convert data
+        X, y = check_X_y(X, y, ['csr', 'csc'])
+
+        # Remap output
+        n_samples, self.n_features_ = X.shape
+        self._n_samples = n_samples
+        y = self._validate_y(y)
+
+        # Check parameters
+        self._validate_estimator()
+
+        if max_depth is not None:
+            self.base_estimator_.max_depth = max_depth
+
+        # Validate max_samples
+        if max_samples is None:
+            max_samples = self.max_samples
+        elif not isinstance(max_samples, (numbers.Integral, np.integer)):
+            max_samples = int(max_samples * X.shape[0])
+
+        if not (0 < max_samples <= X.shape[0]):
+            raise ValueError("max_samples must be in (0, n_samples]")
+
+        # Store validated integer row sampling value
+        self._max_samples = max_samples
+
+        # Validate max_features
+        if isinstance(self.max_features, (numbers.Integral, np.integer)):
+            max_features = self.max_features
+        else:  # float
+            max_features = int(self.max_features * self.window_size)
+
+        # if not (0 < max_features <= self.n_features_):
+        #     raise ValueError("max_features must be in (0, n_features]")
+
+        # Store validated integer feature sampling value
+        self._max_features = max_features
+
+        # Other checks
+        # if not self.bootstrap and self.oob_score:
+        #     raise ValueError("Out of bag estimation only available"
+        #                      " if bootstrap=True")
+
+        # if self.warm_start and self.oob_score:
+        #     raise ValueError("Out of bag estimate only available"
+        #                      " if warm_start=False")
+
+        # if hasattr(self, "oob_score_") and self.warm_start:
+        #     del self.oob_score_
+
+        # if not self.warm_start or len(self.estimators_) == 0:
+        if len(self.estimators_) == 0:
+            # Free allocated memory, if any
+            self.estimators_ = []
+            self.estimators_features_ = []
+
+        n_more_estimators = self.n_estimators - len(self.estimators_)
+
+        # if n_more_estimators < 0:
+        #     raise ValueError('n_estimators=%d must be larger or equal to '
+        #                      'len(estimators_)=%d when warm_start==True'
+        #                      % (self.n_estimators, len(self.estimators_)))
+        #
+        # elif n_more_estimators == 0:
+        #     warn("Warm-start fitting without increasing n_estimators does not "
+        #          "fit new trees.")
+        #     return self
+
+        # Parallel loop
+        n_jobs, n_estimators, starts = _partition_estimators(n_more_estimators,
+                                                             self.n_jobs)
+        total_n_estimators = sum(n_estimators)
+
+        # Advance random state to state after training
+        # the first n_estimators
+        # if self.warm_start and len(self.estimators_) > 0:
+        #     random_state.randint(MAX_INT, size=len(self.estimators_))
+
+        seeds = random_state.randint(MAX_INT, size=n_more_estimators)
+        self._seeds = seeds
+
+        all_results = jl.Parallel(n_jobs=n_jobs, verbose=self.verbose)(
+            jl.delayed(_parallel_build_estimators)(
+                n_estimators[i], self, X[start:self.window_size], y, sample_weight,
+                seeds[starts[i]:starts[i + 1]],
+                total_n_estimators,
+                verbose=self.verbose)
+            for i, start in zip(
+                range(n_jobs), range(0, self.window_size, self.stride)))
+
+        # Reduce
+        self.estimators_ += list(itertools.chain.from_iterable(
+            t[0] for t in all_results))
+        self.estimators_features_ += list(itertools.chain.from_iterable(
+            t[1] for t in all_results))
+
+        if self.oob_score:
+            self._set_oob_score(X, y)
+
+        return self
+
+
+
+
         # if self.code_size <= 0:
         #     raise ValueError("code_size should be greater than 0, got {1}"
         #                      "".format(self.code_size))
@@ -197,7 +425,6 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
                 "max_features must be included in [2, window_size], got {0}"
                 " instead.".format(self.max_features))
         _check_estimator(self.base_estimator)
-        random_state = check_random_state(self.random_state)
 
         self.classes_ = np.unique(y)
         n_classes = self.classes_.shape[0]
@@ -218,9 +445,11 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
         self.estimator_splits_ = []
         for start in range(0, n_features - self.window_size + 1 + (
                 n_features - self.window_size) % self.stride, self.stride):
-            features = []
+            samples, features = [], []
             y_binary_splits = []
             for p in range(self.n_estimators):
+                random_state = check_random_state(self.random_state)
+
                 # prepare the features
                 # 1. choose randomly the max features belonging to [0, k-1]
                 # 1a. how many?
@@ -235,13 +464,15 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
                 # 2. split y and binarise it
                 y_binary_splits.append(random_binarizer(y))
 
-            results = jl.Parallel(n_jobs=self.n_jobs)(
-                jl.delayed(_fit_binary_oob)(
-                    self.base_estimator, X[:, feats], y_binary)
-                for feats, y_binary in zip(features, y_binary_splits))
-            self.estimators_.extend()
+            estimators_ = jl.Parallel(n_jobs=self.n_jobs)(
+                jl.delayed(_fit_binary)(
+                    self.base_estimator, X[mask][:, feats], y_binary[mask])
+                for mask, feats, y_binary in zip(samples, features, y_binary_splits))
+
+            self.estimators_.extend(estimators_)
             self.estimator_features_.extend(features)
             self.estimator_splits_.extend(y_binary_splits)
+
 
         self.X_train_encoding_ = self.encode(X)
         self.y_train_ = y
@@ -273,3 +504,42 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
         knn = classifier.fit(
             self.X_train_encoding_, self.y_train_)
         return knn.predict(X_encoding_)
+
+    def _set_oob_score(self, X, y):
+        n_samples = y.shape[0]
+        n_classes_ = self.n_classes_
+        classes_ = self.classes_
+
+        predictions = np.zeros((n_samples, n_classes_))
+
+        for estimator, samples, features in zip(self.estimators_,
+                                                self.estimators_samples_,
+                                                self.estimators_features_):
+            # Create mask for OOB samples
+            mask = ~samples
+
+            if hasattr(estimator, "predict_proba"):
+                predictions[mask, :] += estimator.predict_proba(
+                    (X[mask, :])[:, features])
+
+            else:
+                p = estimator.predict((X[mask, :])[:, features])
+                j = 0
+
+                for i in range(n_samples):
+                    if mask[i]:
+                        predictions[i, p[j]] += 1
+                        j += 1
+
+        if (predictions.sum(axis=1) == 0).any():
+            warn("Some inputs do not have OOB scores. "
+                 "This probably means too few estimators were used "
+                 "to compute any reliable oob estimates.")
+
+        oob_decision_function = (predictions /
+                                 predictions.sum(axis=1)[:, np.newaxis])
+        oob_score = accuracy_score(y, classes_.take(np.argmax(predictions,
+                                                              axis=1)))
+
+        self.oob_decision_function_ = oob_decision_function
+        self.oob_score_ = oob_score

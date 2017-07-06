@@ -32,6 +32,8 @@ def random_binarizer(y):
     xx = unique[:np.random.randint(1, unique.size - 1)]
     return reduce(np.logical_or, [np.array(y) == x for x in xx]).astype(int)
 
+def _fit_binary_oob(estimator, X, y):
+    return _fit_binary(estimator, X, y)
 
 class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
 
@@ -39,7 +41,7 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
                  n_estimators=50,
                  estimator_params=tuple(),  # ?
                  window_size=5, stride=1,
-                 # code_size=,  # division on the number of classes
+                 code_size='auto',
                  oob_score=False,
                  max_features=None, verbose=False,
                  random_state=None, n_jobs=1):
@@ -92,21 +94,6 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
 
         n_samples, n_features = X.shape
 
-        # FIXME: there are more elaborate methods than generating the codebook
-        # randomly.
-        # self.code_book_ = random_state.random_sample((n_classes, code_size_))
-        # self.code_book_[self.code_book_ > 0.5] = 1
-        #
-        # if hasattr(self.base_estimator, "decision_function"):
-        #     self.code_book_[self.code_book_ != 1] = -1
-        # else:
-        #     self.code_book_[self.code_book_ != 1] = 0
-        #
-        # classes_index = dict((c, i) for i, c in enumerate(self.classes_))
-        #
-        # Y = np.array([self.code_book_[classes_index[y[i]]]
-        #               for i in range(X.shape[0])], dtype=np.int)
-
         # How many windows I have?
         n_windows_ = int(np.ceil((n_features - self.window_size) / self.stride) + 1)
         if self.verbose:
@@ -137,10 +124,11 @@ class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
                 # 2. split y and binarise it
                 y_binary_splits.append(random_binarizer(y))
 
-            self.estimators_.extend(jl.Parallel(n_jobs=self.n_jobs)(
-                jl.delayed(_fit_binary)(
+            results = jl.Parallel(n_jobs=self.n_jobs)(
+                jl.delayed(_fit_binary_oob)(
                     self.base_estimator, X[:, feats], y_binary)
-                for feats, y_binary in zip(features, y_binary_splits)))
+                for feats, y_binary in zip(features, y_binary_splits))
+            self.estimators_.extend()
             self.estimator_features_.extend(features)
             self.estimator_splits_.extend(y_binary_splits)
 

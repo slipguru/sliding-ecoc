@@ -1,11 +1,10 @@
-"""This module implements the sliding-window error correcting code."""
+"""Sliding-window Error Correcting Ouput Code meta-estimator."""
 
 import array
 import numpy as np
-import warnings
 import scipy.sparse as sp
+import warnings
 import itertools
-
 
 from sklearn.base import BaseEstimator, ClassifierMixin, clone, is_classifier
 from sklearn.base import MetaEstimatorMixin, is_regressor
@@ -36,6 +35,118 @@ def _fit_binary_oob(estimator, X, y):
     return _fit_binary(estimator, X, y)
 
 class SlidingECOC(BaseEnsemble, ClassifierMixin, MetaEstimatorMixin):
+    """A SlidingECOC classifier.
+
+    A SlidingECOC classifier is an ensemble meta-estimator specifically
+    designed for multiclass problems. This meta-estimator fits base
+    classifiers each on a random subset of the orignal feature-set in a
+    sliding-window fashion. Size, stride and, consequently, overlap of the
+    sliding window are user-defined. Each base classifier is trained to
+    perform binary classification on a random split of the classes, therefore
+    it produces a 0/1 prediction. Hence, the output of the learning step
+    for each training sample is a binary encoding (e.g., 01001101010).
+    When the out-of-bag error estimation strategy is enabled, only the top
+    performing base classifiers are retained and the encoding length can be
+    user defined. Each encoding is considered as a string of bits received after
+    a transmission on a noisy channel. Once a new encoding is estimated for a
+    new sample, its class predicton is finally achieved by maximum likelihood
+    comparing its encoding with the training ones.
+
+    Parameters
+    ----------
+    base_estimator : object or None, optional (default=None)
+        The base estimator to fit on random subsets of the dataset (if
+        `oob_score` is `True`). If None, then the base estimator is a
+        decision tree.
+
+    n_estimators : int or None, optional (default=100)
+        The total number of base estimators used. If None, then
+        `n_estimators = n_estimators_window * int(ceil((n_features -
+        window_size) / stride) + 1)`.
+
+    n_estimators_window : int, optional (default=10)
+        The number of base estimators for each window (used only if
+        `n_estimators` is None).
+
+    window_size : int, optional (default=5)
+        The size of the sliding window.
+
+    stride : int, optional (default=1)
+        The sliding window stride.
+
+    code_size : int, float, string or None, optional (default="auto")
+        The number of top performing `base_estimator` that are retained to
+        to define each sample encoding. This parameters controls the complexity
+        of the encoding and it should be tuned for better performance.
+
+        - If int, then consider `code_size` classifiers.
+        - If float, then `code_size` is a percentage and
+          `int(code_size * n_tot_estimators)` estimators are considered for each
+          encoding.
+        - If "auto", then `code_size=n_tot_estimators`.
+        - If "sqrt", then `code_size=sqrt(n_tot_estimators)`.
+        - If "log2", then `code_size=log2(n_tot_estimators)`.
+        - If None, then `code_size=n_tot_estimators` (same as "auto").
+
+    oob_score : bool
+        Whether to use out-of-bag samples to estimate
+        the generalization error.
+
+    max_features : int or float, optional (default=1.0)
+        The number of features to draw from the sliding window to train each
+        base estimator.
+            - If int, then draw `max_features` features.
+            - If float, then draw `int(max_features * window_size)` features.
+
+    bootstrap : boolean, optional (default=True)
+        Whether samples are drawn with replacement.
+
+    bootstrap_features : boolean, optional (default=False)
+        Whether features are drawn with replacement.
+
+    n_jobs : int, optional (default=1)
+        The number of jobs to run in parallel for both `fit` and `predict`.
+        If -1, then the number of jobs is set to the number of cores.
+
+    random_state : int, RandomState instance or None, optional (default=None)
+        If int, random_state is the seed used by the random number generator;
+        If RandomState instance, random_state is the random number generator;
+        If None, the random number generator is the RandomState instance used
+        by `np.random`.
+
+    verbose : int, optional (default=0)
+        Controls the verbosity of the building process.
+
+     Attributes
+    ----------
+    base_estimator_ : estimator
+        The base estimator from which the ensemble is grown.
+
+    estimators_ : list of estimators
+        The collection of fitted base estimators.
+
+    estimators_samples_ : list of arrays
+        The subset of drawn samples (i.e., the in-bag samples) for each base
+        estimator. Each subset is defined by a boolean mask.
+
+    estimators_features_ : list of arrays
+        The subset of drawn features for each base estimator.
+
+    classes_ : array of shape = [n_classes]
+        The classes labels.
+
+    n_classes_ : int or list
+        The number of classes.
+
+    oob_score_ : float
+        Score of the training dataset obtained using an out-of-bag estimate.
+
+    oob_decision_function_ : array of shape = [n_samples, n_classes]
+        Decision function computed with out-of-bag estimate on the training
+        set. If n_estimators is small it might be possible that a data point
+        was never left out during the bootstrap. In this case,
+        `oob_decision_function_` might contain NaN.
+    """
 
     def __init__(self, base_estimator=None,
                  n_estimators=50,

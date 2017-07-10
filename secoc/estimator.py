@@ -1,66 +1,49 @@
 """Sliding-window Error Correcting Ouput Code meta-estimator."""
+from __future__ import division
 
-import array
 import numpy as np
 import numbers
-import scipy.sparse as sp
 import warnings
 import itertools
 
-from sklearn.base import BaseEstimator, ClassifierMixin, clone, is_classifier
-from sklearn.base import MetaEstimatorMixin, is_regressor
-from sklearn.ensemble.base import BaseEnsemble
-from sklearn.externals import joblib as jl
-from sklearn.externals.six.moves import zip as izip
-from sklearn.multiclass import _check_estimator, _fit_binary, _predict_binary
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.preprocessing import LabelBinarizer
-from sklearn.utils import check_random_state, check_X_y
-from sklearn.utils.validation import check_is_fitted
-
-from sklearn.metrics.pairwise import euclidean_distances
-from sklearn.utils.multiclass import (_check_partial_fit_first_call,
-                                      check_classification_targets,
-                                      _ovr_decision_function)
-from sklearn.utils.metaestimators import _safe_split
-from sklearn.ensemble.forest import _generate_sample_indices
-from sklearn.ensemble.forest import _generate_unsampled_indices
-from sklearn.ensemble.bagging import _generate_indices
+from sklearn.base import ClassifierMixin
+from sklearn.base import MetaEstimatorMixin
+from sklearn.ensemble.bagging import _generate_indices, MAX_INT
 from sklearn.ensemble.bagging import BaseBagging
 from sklearn.ensemble.base import _partition_estimators
+from sklearn.externals import joblib as jl
+from sklearn.metrics import accuracy_score
+from sklearn.multiclass import _check_estimator
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.utils import check_random_state, check_X_y, column_or_1d
 from sklearn.utils import indices_to_mask
 from sklearn.utils.fixes import bincount
-from sklearn.utils.validation import has_fit_parameter, check_is_fitted
-
-MAX_INT = np.iinfo(np.int32).max
-
-
-def _generate_feature_window_start(n_estimators_window, n_features, window_size,
-                                   stride):
-    for start in range(0, n_features - window_size + 1 + (
-            n_features - window_size) % stride, stride):
-        for i in range(n_estimators_window):
-            yield start
+from sklearn.utils.multiclass import check_classification_targets
+from sklearn.utils.validation import check_is_fitted
+from sklearn.utils.validation import has_fit_parameter
 
 
-def _generate_bagging_indices(random_state, bootstrap_features,
-                              bootstrap_samples, n_features, n_samples,
+def _generate_bagging_indices(random_state_features, random_state_samples,
+                              bootstrap_features, bootstrap_samples,
+                              n_features, n_samples,
                               max_features, max_samples):
     """Randomly draw feature and sample indices."""
-    # Get valid random state
-    random_state = check_random_state(random_state)
-
     # Draw indices
-    feature_indices = _generate_indices(random_state, bootstrap_features,
-                                        n_features, max_features)
-    sample_indices = _generate_indices(random_state, bootstrap_samples,
-                                       n_samples, max_samples)
+    feature_indices = _generate_indices(
+        check_random_state(random_state_features), bootstrap_features,
+        n_features, max_features)
+    sample_indices = _generate_indices(
+        check_random_state(random_state_samples), bootstrap_samples,
+        n_samples, max_samples)
 
     return feature_indices, sample_indices
 
 
 def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
-                               seeds, total_n_estimators, verbose):
+                               seeds_features, seeds_samples,
+                               total_n_estimators, verbose,
+                               start_index, circular_features=False):
     """Private function used to build a batch of estimators within a job."""
     # Retrieve settings
     n_samples, n_features = X.shape
@@ -76,24 +59,40 @@ def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
     # Build estimators
     estimators = []
     estimators_features = []
+    estimators_samples = []
+    estimators_splits = []
 
     for i in range(n_estimators):
         if verbose > 1:
             print("Building estimator %d of %d for this parallel run (total %d)..." %
                   (i + 1, n_estimators, total_n_estimators))
 
-        random_state = np.random.RandomState(seeds[i])
+        random_state_features = np.random.RandomState(seeds_features[i])
+        random_state = np.random.RandomState(seeds_samples[i])
         estimator = ensemble._make_estimator(append=False,
                                              random_state=random_state)
 
         # Draw random feature, sample indices
-        features, indices = _generate_bagging_indices(random_state,
-                                                      bootstrap_features,
-                                                      bootstrap, n_features,
-                                                      n_samples, max_features,
-                                                      max_samples)
+        if circular_features:
+            n_features_window = ensemble.window_size
+            max_features_window = max_features
+        else:
+            n_features_window = min(ensemble.window_size, n_features - start_index[i])
+            max_features_window = min(max_features, n_features - start_index[i])
+
+        features, indices = _generate_bagging_indices(
+            random_state_features, random_state,
+            bootstrap_features, bootstrap,
+            n_features_window, n_samples,
+            max_features_window, max_samples)
+
+        features += start_index[i]
+
+        # ensure not going outside range, take the first ones instead
+        np.mod(features, n_features, out=features)
 
         # Draw samples, using sample weights, and then fit
+        y_binary = random_binarizer(y)
         if support_sample_weight:
             if sample_weight is None:
                 curr_sample_weight = np.ones((n_samples,))
@@ -107,30 +106,28 @@ def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
                 not_indices_mask = ~indices_to_mask(indices, n_samples)
                 curr_sample_weight[not_indices_mask] = 0
 
-            estimator.fit(X[:, features], y, sample_weight=curr_sample_weight)
+            estimator.fit(X[:, features], y_binary, sample_weight=curr_sample_weight)
 
         # Draw samples, using a mask, and then fit
         else:
-            estimator.fit((X[indices])[:, features], y[indices])
+            estimator.fit((X[indices])[:, features], y_binary[indices])
 
         estimators.append(estimator)
         estimators_features.append(features)
+        estimators_samples.append(indices)
+        estimators_splits.append(y_binary)
 
-    return estimators, estimators_features
+    return estimators, estimators_features, estimators_samples, estimators_splits
 
 
 def random_binarizer(y):
-    y = np.array(y)
+    # y = np.array(y)
     unique = np.unique(y)
+    if unique.size < 3:
+        return y
     np.random.shuffle(unique)
     xx = unique[:np.random.randint(1, unique.size - 1)]
-    return reduce(np.logical_or, [np.array(y) == x for x in xx]).astype(int)
-
-
-def _fit_binary_oob(estimator, X, y):
-    indices = _generate_sample_indices(estimator.random_state, n_samples)
-    fitted_estimator = _fit_binary(estimator, X[indices], y[indices])
-    return None
+    return reduce(np.logical_or, [y == x for x in xx]).astype(int)
 
 
 class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
@@ -191,6 +188,11 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         Whether to use out-of-bag samples to estimate
         the generalization error.
 
+    max_samples : int or float, optional (default=1.0)
+        The number of samples to draw from X to train each base estimator.
+            - If int, then draw `max_samples` samples.
+            - If float, then draw `max_samples * X.shape[0]` samples.
+
     max_features : int or float, optional (default=1.0)
         The number of features to draw from the sliding window to train each
         base estimator.
@@ -248,7 +250,7 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
     """
 
     def __init__(self, base_estimator=None,
-                 n_estimators=50,
+                 n_estimators=100,
                  max_samples=1.0,
                  max_features=1.0,
                  bootstrap=True,
@@ -259,7 +261,10 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
                  verbose=0,
 
                  window_size=5,
+                 n_estimators_window=10,
+                 circular_features=False,
                  stride=1,
+                 single_seed_features=False,
                  code_size='auto'):
 
         super(SlidingECOC, self).__init__(
@@ -276,7 +281,10 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
 
         self.window_size = window_size
         self.stride = stride
+        self.circular_features = circular_features
         self.code_size = code_size
+        self.n_estimators_window = n_estimators_window
+        self.single_seed_features = single_seed_features
 
     def _fit(self, X, y, max_samples=None, max_depth=None, sample_weight=None):
         """Build an ensemble of estimators from the training
@@ -319,7 +327,26 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         self._n_samples = n_samples
         y = self._validate_y(y)
 
+        if not 0 < self.window_size <= self.n_features_:
+            raise ValueError("window_size not valid")
+
+        if not 0 < self.stride <= self.window_size:
+            raise ValueError("stride not valid")
+
         # Check parameters
+        if not self.circular_features:
+            self.n_windows_ = int(np.ceil((
+                self.n_features_ - self.window_size) / self.stride) + 1)
+        else:
+            self.n_windows_ = len(range(0, self.n_features_, self.stride))
+
+        if self.n_estimators is None:
+            self.n_estimators = self.n_estimators_window * self.n_windows_
+        else:
+            self.n_estimators_window = int(self.n_estimators / self.n_windows_)
+            self.n_estimators = self.n_estimators_window * self.n_windows_
+
+        # _check_estimator(self.base_estimator)  # ?
         self._validate_estimator()
 
         if max_depth is not None:
@@ -343,16 +370,19 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         else:  # float
             max_features = int(self.max_features * self.window_size)
 
-        # if not (0 < max_features <= self.n_features_):
-        #     raise ValueError("max_features must be in (0, n_features]")
+        if (self.bootstrap_features and max_features <= 0) or \
+                not (0 < max_features <= self.window_size):
+            raise ValueError("max_features must be in (0, window_size] if not"
+                             " bootstrap_features.")
 
         # Store validated integer feature sampling value
         self._max_features = max_features
 
         # Other checks
-        # if not self.bootstrap and self.oob_score:
-        #     raise ValueError("Out of bag estimation only available"
-        #                      " if bootstrap=True")
+        if not self.bootstrap and self.oob_score and \
+                self._max_samples >= n_samples:
+            raise ValueError("Out of bag estimation only available"
+                             " if bootstrap=True or max_samples < n_samples")
 
         # if self.warm_start and self.oob_score:
         #     raise ValueError("Out of bag estimate only available"
@@ -366,9 +396,34 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
             # Free allocated memory, if any
             self.estimators_ = []
             self.estimators_features_ = []
+            self._estimators_samples = []
 
         n_more_estimators = self.n_estimators - len(self.estimators_)
 
+        # using oob_score, take only "code_size" best estimators
+        if isinstance(self.code_size, (numbers.Integral, np.integer)):
+            self.code_size_ = self.code_size
+        elif isinstance(self.code_size, (numbers.Real, np.float)):  # float
+            self.code_size_ = int(self.code_size * self.n_estimators)
+        elif self.code_size is None or self.code_size == 'auto':
+            self.code_size_ = self.n_estimators
+        elif self.code_size == 'sqrt':
+            self.code_size_ = int(np.sqrt(self.n_estimators))
+        elif self.code_size == 'log2':
+            self.code_size_ = int(np.log2(self.n_estimators))
+        else:
+            raise ValueError("Value for code_size '{}' unrecognized".format(
+                self.code_size))
+
+        if self.code_size <= 0:
+            raise ValueError("code_size should be greater than 0, got {1}"
+                             "".format(self.code_size))
+
+        if self.verbose:
+            print("You are about to generate {0} estimators for {1} windows, "
+                  "for a total of {2} estimators.".format(
+                      self.n_estimators_window, self.n_windows_,
+                      self.n_estimators))
         # if n_more_estimators < 0:
         #     raise ValueError('n_estimators=%d must be larger or equal to '
         #                      'len(estimators_)=%d when warm_start==True'
@@ -388,103 +443,101 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         # the first n_estimators
         # if self.warm_start and len(self.estimators_) > 0:
         #     random_state.randint(MAX_INT, size=len(self.estimators_))
+        if self.single_seed_features:
+            seeds_features = np.repeat(
+                random_state.randint(MAX_INT, size=1),
+                n_more_estimators)
+        else:
+            seeds_features = random_state.randint(MAX_INT, size=n_more_estimators)
+
+        self._seeds_features = seeds_features
 
         seeds = random_state.randint(MAX_INT, size=n_more_estimators)
         self._seeds = seeds
 
+        start_index = (iter(sorted(self.n_estimators_window * range(
+            0, self.n_features_, self.stride))))
+
+        self.estimators_splits_ = []
         all_results = jl.Parallel(n_jobs=n_jobs, verbose=self.verbose)(
             jl.delayed(_parallel_build_estimators)(
-                n_estimators[i], self, X[start:self.window_size], y, sample_weight,
+                n_estimators[i], self,
+                X,
+                y, sample_weight,
+                seeds_features[starts[i]:starts[i + 1]],
                 seeds[starts[i]:starts[i + 1]],
                 total_n_estimators,
-                verbose=self.verbose)
-            for i, start in zip(
-                range(n_jobs), range(0, self.window_size, self.stride)))
+                start_index=list(itertools.islice(start_index, n_estimators[i])),
+                verbose=self.verbose,
+                circular_features=self.circular_features)
+            for i in range(n_jobs))
 
         # Reduce
         self.estimators_ += list(itertools.chain.from_iterable(
             t[0] for t in all_results))
         self.estimators_features_ += list(itertools.chain.from_iterable(
             t[1] for t in all_results))
+        self._estimators_samples += list(itertools.chain.from_iterable(
+            t[2] for t in all_results))
+        self.estimators_splits_ += list(itertools.chain.from_iterable(
+            t[3] for t in all_results))
 
         if self.oob_score:
             self._set_oob_score(X, y)
 
-        return self
-
-
-
-
-        # if self.code_size <= 0:
-        #     raise ValueError("code_size should be greater than 0, got {1}"
-        #                      "".format(self.code_size))
-        if self.max_features is None:
-            self.max_features = self.window_size
-        elif not 1 < self.max_features <= self.window_size:
-            raise ValueError(
-                "max_features must be included in [2, window_size], got {0}"
-                " instead.".format(self.max_features))
-        _check_estimator(self.base_estimator)
-
-        self.classes_ = np.unique(y)
-        n_classes = self.classes_.shape[0]
-        # code_size_ = int(n_classes * self.code_size)
-
-        n_samples, n_features = X.shape
-
-        # How many windows I have?
-        n_windows_ = int(np.ceil((n_features - self.window_size) / self.stride) + 1)
-        if self.verbose:
-            print("You are about to generate {0} estimators for {1} windows, "
-                  "for a total of {2} estimators.".format(
-                      self.n_estimators, n_windows_,
-                      self.n_estimators * n_windows_))
-
         # sliding window
-        self.estimator_features_ = []
-        self.estimator_splits_ = []
-        for start in range(0, n_features - self.window_size + 1 + (
-                n_features - self.window_size) % self.stride, self.stride):
-            samples, features = [], []
-            y_binary_splits = []
-            for p in range(self.n_estimators):
-                random_state = check_random_state(self.random_state)
-
-                # prepare the features
-                # 1. choose randomly the max features belonging to [0, k-1]
-                # 1a. how many?
-                n_features_window = np.random.randint(1, min(
-                    self.max_features, n_features - start - 1))
-                # 1b. which ones?
-                features.append(np.random.randint(
-                    start,
-                    min(start + self.window_size, n_features),
-                    n_features_window))
-
-                # 2. split y and binarise it
-                y_binary_splits.append(random_binarizer(y))
-
-            estimators_ = jl.Parallel(n_jobs=self.n_jobs)(
-                jl.delayed(_fit_binary)(
-                    self.base_estimator, X[mask][:, feats], y_binary[mask])
-                for mask, feats, y_binary in zip(samples, features, y_binary_splits))
-
-            self.estimators_.extend(estimators_)
-            self.estimator_features_.extend(features)
-            self.estimator_splits_.extend(y_binary_splits)
-
+        # for start in range(0, n_features - self.window_size + 1 + (
+        #         n_features - self.window_size) % self.stride, self.stride):
+        #     samples, features = [], []
+        #     y_binary_splits = []
+        #     for p in range(self.n_estimators):
+        #         random_state = check_random_state(self.random_state)
+        #
+        #         # prepare the features
+        #         # 1. choose randomly the max features belonging to [0, k-1]
+        #         # 1a. how many?
+        #         n_features_window = np.random.randint(1, min(
+        #             self.max_features, n_features - start - 1))
+        #         # 1b. which ones?
+        #         features.append(np.random.randint(
+        #             start,
+        #             min(start + self.window_size, n_features),
+        #             n_features_window))
+        #
+        #         # 2. split y and binarise it
+        #         y_binary_splits.append(random_binarizer(y))
+        #
+        #     estimators_ = jl.Parallel(n_jobs=self.n_jobs)(
+        #         jl.delayed(_fit_binary)(
+        #             self.base_estimator, X[mask][:, feats], y_binary[mask])
+        #         for mask, feats, y_binary in zip(samples, features, y_binary_splits))
+        #
+        #     self.estimators_.extend(estimators_)
+        #     self.estimator_features_.extend(features)
+        #     self.estimator_splits_.extend(y_binary_splits)
 
         self.X_train_encoding_ = self.encode(X)
         self.y_train_ = y
         return self
 
+    @property
+    def estimators_samples_(self):
+        """The subset of drawn samples for each base estimator."""
+        return self._estimators_samples
+
     def encode(self, X):
+        """Encode the initial features."""
         check_is_fitted(self, 'estimators_')
 
-        return np.array([estimator.predict(X[:, feats]) for estimator, feats in zip(
-            self.estimators_, self.estimator_features_)]).T
+        if self.oob_score:
+            idx = np.argsort(self.oob_score_)[::-1][:self.code_size_]
+        else:
+            idx = np.ones(len(self.estimators_), dtype=bool)
 
-    def predict(self, X, classifier=None):
+        return np.array([estimator.predict(X[:, feats]) for estimator, feats in zip(
+            np.array(self.estimators_)[idx], np.array(self.estimators_features_)[idx])]).T
+
+    def predict(self, X, classifier=None, code_size=None):
         """Predict multi-class targets using underlying estimators.
 
         Parameters
@@ -499,47 +552,46 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         """
         X_encoding_ = self.encode(X)
         # pred = euclidean_distances(Y, self.code_book_).argmin(axis=1)
+
+        if code_size is None:
+            code_size = self.code_size_
+
         if classifier is None:
             classifier = KNeighborsClassifier()
         knn = classifier.fit(
-            self.X_train_encoding_, self.y_train_)
-        return knn.predict(X_encoding_)
+            self.X_train_encoding_[:, :code_size], self.y_train_)
+        return knn.predict(X_encoding_[:, :code_size])
 
     def _set_oob_score(self, X, y):
         n_samples = y.shape[0]
-        n_classes_ = self.n_classes_
-        classes_ = self.classes_
 
-        predictions = np.zeros((n_samples, n_classes_))
+        predictions = np.zeros((n_samples, self.n_estimators)) - 1
+        oob_score = np.zeros(self.n_estimators)
 
-        for estimator, samples, features in zip(self.estimators_,
-                                                self.estimators_samples_,
-                                                self.estimators_features_):
+        for i, (estimator, samples, split, features) in enumerate(zip(
+            self.estimators_, self.estimators_samples_,
+                self.estimators_splits_, self.estimators_features_)):
             # Create mask for OOB samples
+            samples = indices_to_mask(samples, n_samples)
             mask = ~samples
 
-            if hasattr(estimator, "predict_proba"):
-                predictions[mask, :] += estimator.predict_proba(
-                    (X[mask, :])[:, features])
+            predictions[mask, i] = estimator.predict(X[mask][:, features])
 
-            else:
-                p = estimator.predict((X[mask, :])[:, features])
-                j = 0
+            oob_score[i] = accuracy_score(split[mask], predictions[mask, i])
 
-                for i in range(n_samples):
-                    if mask[i]:
-                        predictions[i, p[j]] += 1
-                        j += 1
-
-        if (predictions.sum(axis=1) == 0).any():
-            warn("Some inputs do not have OOB scores. "
-                 "This probably means too few estimators were used "
-                 "to compute any reliable oob estimates.")
-
-        oob_decision_function = (predictions /
-                                 predictions.sum(axis=1)[:, np.newaxis])
-        oob_score = accuracy_score(y, classes_.take(np.argmax(predictions,
-                                                              axis=1)))
-
-        self.oob_decision_function_ = oob_decision_function
+        # self.oob_decision_function_ = oob_decision_function
+        self.prediction_ = predictions
         self.oob_score_ = oob_score
+
+    def _validate_estimator(self):
+        """Check the estimator and set the base_estimator_ attribute."""
+        super(SlidingECOC, self)._validate_estimator(
+            default=DecisionTreeClassifier())
+
+    def _validate_y(self, y):
+        y = column_or_1d(y, warn=True)
+        check_classification_targets(y)
+        self.classes_, y = np.unique(y, return_inverse=True)
+        self.n_classes_ = len(self.classes_)
+
+        return y

@@ -32,7 +32,7 @@ def _generate_bagging_indices(random_state_features, random_state_samples,
     # Draw indices
     feature_indices = _generate_indices(
         check_random_state(random_state_features), bootstrap_features,
-        n_features, max_features)
+        n_features, np.random.randint(1, max_features + 1))
     sample_indices = _generate_indices(
         check_random_state(random_state_samples), bootstrap_samples,
         n_samples, max_samples)

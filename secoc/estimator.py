@@ -444,13 +444,16 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         # if self.warm_start and len(self.estimators_) > 0:
         #     random_state.randint(MAX_INT, size=len(self.estimators_))
         if self.single_seed_features:
-            seeds_features = np.repeat(
-                random_state.randint(MAX_INT, size=1),
-                n_more_estimators)
+            # different features inside a single windows, then shift
+            seeds_features = np.tile(
+                random_state.randint(MAX_INT, size=self.n_estimators_window),
+                self.n_windows_)
         else:
             seeds_features = random_state.randint(MAX_INT, size=n_more_estimators)
 
         self._seeds_features = seeds_features
+        if self.verbose > 1:
+            print("Seeds features: %s" % seeds_features)
 
         seeds = random_state.randint(MAX_INT, size=n_more_estimators)
         self._seeds = seeds
@@ -532,7 +535,7 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         if self.oob_score:
             idx = np.argsort(self.oob_score_)[::-1][:self.code_size_]
         else:
-            idx = np.ones(len(self.estimators_), dtype=bool)
+            idx = Ellipsis  # get everyone
 
         return np.array([estimator.predict(X[:, feats]) for estimator, feats in zip(
             np.array(self.estimators_)[idx], np.array(self.estimators_features_)[idx])]).T

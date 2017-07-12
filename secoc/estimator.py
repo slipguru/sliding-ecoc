@@ -25,6 +25,7 @@ from sklearn.utils.validation import has_fit_parameter
 
 
 def _generate_bagging_indices(random_state_features, random_state_samples,
+                              random_state_max_features,
                               bootstrap_features, bootstrap_samples,
                               n_features, n_samples,
                               max_features, max_samples):
@@ -32,7 +33,8 @@ def _generate_bagging_indices(random_state_features, random_state_samples,
     # Draw indices
     feature_indices = _generate_indices(
         check_random_state(random_state_features), bootstrap_features,
-        n_features, np.random.randint(1, max_features + 1))
+        n_features,
+        check_random_state(random_state_max_features).randint(1, max_features + 1))
     sample_indices = _generate_indices(
         check_random_state(random_state_samples), bootstrap_samples,
         n_samples, max_samples)
@@ -41,7 +43,7 @@ def _generate_bagging_indices(random_state_features, random_state_samples,
 
 
 def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
-                               seeds_features, seeds_samples,
+                               seeds_features, seeds_samples, seeds_max_features,
                                total_n_estimators, verbose,
                                start_index, circular_features=False):
     """Private function used to build a batch of estimators within a job."""
@@ -67,6 +69,7 @@ def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
             print("Building estimator %d of %d for this parallel run (total %d)..." %
                   (i + 1, n_estimators, total_n_estimators))
 
+        random_state_max_features = np.random.RandomState(seeds_max_features[i])
         random_state_features = np.random.RandomState(seeds_features[i])
         random_state = np.random.RandomState(seeds_samples[i])
         estimator = ensemble._make_estimator(append=False,
@@ -81,7 +84,7 @@ def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
             max_features_window = min(max_features, n_features - start_index[i])
 
         features, indices = _generate_bagging_indices(
-            random_state_features, random_state,
+            random_state_features, random_state, random_state_max_features,
             bootstrap_features, bootstrap,
             n_features_window, n_samples,
             max_features_window, max_samples)
@@ -448,10 +451,15 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
             seeds_features = np.tile(
                 random_state.randint(MAX_INT, size=self.n_estimators_window),
                 self.n_windows_)
+            seeds_max_features = np.tile(
+                random_state.randint(MAX_INT, size=self.n_estimators_window),
+                self.n_windows_)
         else:
             seeds_features = random_state.randint(MAX_INT, size=n_more_estimators)
+            seeds_max_features = random_state.randint(MAX_INT, size=n_more_estimators)
 
         self._seeds_features = seeds_features
+        self._seeds_max_features = seeds_max_features
         if self.verbose > 1:
             print("Seeds features: %s" % seeds_features)
 
@@ -469,6 +477,7 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
                 y, sample_weight,
                 seeds_features[starts[i]:starts[i + 1]],
                 seeds[starts[i]:starts[i + 1]],
+                seeds_max_features[starts[i]:starts[i + 1]],
                 total_n_estimators,
                 start_index=list(itertools.islice(start_index, n_estimators[i])),
                 verbose=self.verbose,

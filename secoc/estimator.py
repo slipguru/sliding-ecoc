@@ -585,10 +585,9 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         oob_score = np.zeros(self.n_estimators)
 
         for i, (estimator, samples, split, features) in enumerate(zip(
-            self.estimators_, self.estimators_samples_,
+                self.estimators_, self.estimators_samples_,
                 self.estimators_splits_, self.estimators_features_)):
             # Create mask for OOB samples
-            print(samples)
             samples = indices_to_mask(samples, n_samples)
             mask = ~samples
 

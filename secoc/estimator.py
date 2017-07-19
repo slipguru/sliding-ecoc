@@ -268,6 +268,7 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
                  circular_features=False,
                  stride=1,
                  single_seed_features=False,
+                 single_seed_samples=False,
                  code_size='auto'):
 
         super(SlidingECOC, self).__init__(
@@ -288,6 +289,7 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         self.code_size = code_size
         self.n_estimators_window = n_estimators_window
         self.single_seed_features = single_seed_features
+        self.single_seed_samples = single_seed_samples
 
     def _fit(self, X, y, max_samples=None, max_depth=None, sample_weight=None):
         """Build an ensemble of estimators from the training
@@ -403,6 +405,10 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
 
         n_more_estimators = self.n_estimators - len(self.estimators_)
 
+        if n_more_estimators < 1:
+            raise ValueError('n_estimators=%d must be larger or equal to 1'
+                             % (self.n_estimators))
+
         # using oob_score, take only "code_size" best estimators
         if isinstance(self.code_size, (numbers.Integral, np.integer)):
             self.code_size_ = self.code_size
@@ -427,15 +433,6 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
                   "for a total of {2} estimators.".format(
                       self.n_estimators_window, self.n_windows_,
                       self.n_estimators))
-        # if n_more_estimators < 0:
-        #     raise ValueError('n_estimators=%d must be larger or equal to '
-        #                      'len(estimators_)=%d when warm_start==True'
-        #                      % (self.n_estimators, len(self.estimators_)))
-        #
-        # elif n_more_estimators == 0:
-        #     warn("Warm-start fitting without increasing n_estimators does not "
-        #          "fit new trees.")
-        #     return self
 
         # Parallel loop
         n_jobs, n_estimators, starts = _partition_estimators(n_more_estimators,
@@ -463,8 +460,15 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         if self.verbose > 1:
             print("Seeds features: %s" % seeds_features)
 
-        seeds = random_state.randint(MAX_INT, size=n_more_estimators)
+        if self.single_seed_samples:
+            seeds = np.tile(random_state.randint(MAX_INT, size=1),
+                            n_more_estimators)
+        else:
+            seeds = random_state.randint(MAX_INT, size=n_more_estimators)
+
         self._seeds = seeds
+        if self.verbose > 1:
+            print("Seeds samples: %s" % seeds)
 
         start_index = (iter(sorted(self.n_estimators_window * range(
             0, self.n_features_, self.stride))))
@@ -584,6 +588,7 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
             self.estimators_, self.estimators_samples_,
                 self.estimators_splits_, self.estimators_features_)):
             # Create mask for OOB samples
+            print(samples)
             samples = indices_to_mask(samples, n_samples)
             mask = ~samples
 

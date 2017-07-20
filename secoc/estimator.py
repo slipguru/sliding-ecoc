@@ -627,7 +627,7 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
                     self.estimators_, self.estimators_samples_,
                     self.estimators_splits_, self.estimators_features_)))
 
-        predictions = np.array(predictions).T
+        predictions = np.array(predictions, dtype=np.int8).T
         # self.oob_decision_function_ = oob_decision_function
         self.prediction_ = predictions
         self.oob_score_ = oob_score
@@ -651,7 +651,7 @@ def _predict_score_single_estimator(estimator, X, samples, split,
     samples = indices_to_mask(samples, n_samples)
     mask = ~samples
 
-    predictions = np.zeros(n_samples) - 1
+    predictions = np.empty(n_samples, dtype=np.int8)
     predictions[mask] = estimator.predict(X[mask])
 
     oob_score = accuracy_score(split[mask], predictions[mask])

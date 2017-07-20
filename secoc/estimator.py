@@ -1,10 +1,11 @@
 """Sliding-window Error Correcting Ouput Code meta-estimator."""
-from __future__ import division
+from __future__ import division, print_function
 
-import numpy as np
-import numbers
-import warnings
 import itertools
+import numbers
+import numpy as np
+import sys
+import warnings
 
 from sklearn.base import ClassifierMixin
 from sklearn.base import MetaEstimatorMixin
@@ -13,7 +14,6 @@ from sklearn.ensemble.bagging import BaseBagging
 from sklearn.ensemble.base import _partition_estimators
 from sklearn.externals import joblib as jl
 from sklearn.metrics import accuracy_score
-from sklearn.multiclass import _check_estimator
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.utils import check_random_state, check_X_y, column_or_1d
@@ -550,8 +550,17 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         else:
             idx = Ellipsis  # get everyone
 
-        return np.array([estimator.predict(X[:, feats]) for estimator, feats in zip(
-            np.array(self.estimators_)[idx], np.array(self.estimators_features_)[idx])]).T
+        n_samples = X.shape[0]
+        code_size = self.code_size_ if self.oob_score else self.n_estimators
+        encoding = np.empty((n_samples, code_size))
+        for i, (estimator, feats) in enumerate(
+                zip(np.array(self.estimators_)[idx],
+                    np.array(self.estimators_features_)[idx])):
+            encoding[:, i] = estimator.predict(X[:, feats])
+            if self.verbose > 1 and i % 20 == 0:
+                print("Encoding. Done %d/%d" % (i + 1, code_size), end="\r",
+                      file=sys.stderr)
+        return encoding
 
     def predict(self, X, classifier=None, code_size=None):
         """Predict multi-class targets using underlying estimators.
@@ -566,8 +575,7 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         y : numpy array of shape [n_samples]
             Predicted multi-class targets.
         """
-        X_encoding_ = self.encode(X)
-        # pred = euclidean_distances(Y, self.code_book_).argmin(axis=1)
+        encoding = self.encode(X)
 
         if code_size is None:
             code_size = self.code_size_
@@ -576,7 +584,7 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
             classifier = KNeighborsClassifier()
         knn = classifier.fit(
             self.X_train_encoding_[:, :code_size], self.y_train_)
-        return knn.predict(X_encoding_[:, :code_size])
+        return knn.predict(encoding[:, :code_size])
 
     def _set_oob_score(self, X, y):
         n_samples = y.shape[0]
@@ -609,5 +617,4 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         check_classification_targets(y)
         self.classes_, y = np.unique(y, return_inverse=True)
         self.n_classes_ = len(self.classes_)
-
         return y

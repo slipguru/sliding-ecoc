@@ -602,24 +602,32 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
     def _set_oob_score(self, X, y):
         n_samples = y.shape[0]
 
-        predictions = np.zeros((n_samples, self.n_estimators)) - 1
-        oob_score = np.zeros(self.n_estimators)
+        # predictions = np.zeros((n_samples, self.n_estimators)) - 1
+        # oob_score = np.zeros(self.n_estimators)
 
-        for i, (estimator, samples, split, features) in enumerate(zip(
-                self.estimators_, self.estimators_samples_,
-                self.estimators_splits_, self.estimators_features_)):
-            # Create mask for OOB samples
-            samples = indices_to_mask(samples, n_samples)
-            mask = ~samples
+        # for i, (estimator, samples, split, features) in enumerate(zip(
+        #         self.estimators_, self.estimators_samples_,
+        #         self.estimators_splits_, self.estimators_features_)):
+        #     # Create mask for OOB samples
+        #     samples = indices_to_mask(samples, n_samples)
+        #     mask = ~samples
+        #
+        #     predictions[mask, i] = estimator.predict(X[mask][:, features])
+        #
+        #     oob_score[i] = accuracy_score(split[mask], predictions[mask, i])
+        #
+        #     if self.verbose > 1 and i % 20 == 0:
+        #         print("Encoding. Done %d/%d" % (i + 1, self.n_estimators),
+        #               end="\r", file=sys.stderr)
+        predictions, oob_score = zip(
+            *jl.Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
+                jl.delayed(_predict_score_single_estimator)(
+                    estimator, X[:, features], samples, split, n_samples)
+                for estimator, samples, split, features in zip(
+                    self.estimators_, self.estimators_samples_,
+                    self.estimators_splits_, self.estimators_features_)))
 
-            predictions[mask, i] = estimator.predict(X[mask][:, features])
-
-            oob_score[i] = accuracy_score(split[mask], predictions[mask, i])
-
-            if self.verbose > 1 and i % 20 == 0:
-                print("Encoding. Done %d/%d" % (i + 1, self.n_estimators),
-                      end="\r", file=sys.stderr)
-
+        predictions = np.array(predictions).T
         # self.oob_decision_function_ = oob_decision_function
         self.prediction_ = predictions
         self.oob_score_ = oob_score
@@ -635,3 +643,16 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         self.classes_, y = np.unique(y, return_inverse=True)
         self.n_classes_ = len(self.classes_)
         return y
+
+
+def _predict_score_single_estimator(estimator, X, samples, split,
+                                    n_samples):
+    # Create mask for OOB samples
+    samples = indices_to_mask(samples, n_samples)
+    mask = ~samples
+
+    predictions = np.zeros(n_samples) - 1
+    predictions[mask] = estimator.predict(X[mask])
+
+    oob_score = accuracy_score(split[mask], predictions[mask])
+    return predictions, oob_score

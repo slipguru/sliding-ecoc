@@ -24,6 +24,10 @@ from sklearn.utils.validation import check_is_fitted
 from sklearn.utils.validation import has_fit_parameter
 
 
+def _predict_single_estimator(estimator, X):
+    return estimator.predict(X)
+
+
 def _generate_bagging_indices(random_state_features, random_state_samples,
                               random_state_max_features,
                               bootstrap_features, bootstrap_samples,
@@ -550,16 +554,25 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         else:
             idx = Ellipsis  # get everyone
 
-        n_samples = X.shape[0]
-        code_size = self.code_size_ if self.oob_score else self.n_estimators
-        encoding = np.empty((n_samples, code_size))
-        for i, (estimator, feats) in enumerate(
-                zip(np.array(self.estimators_)[idx],
-                    np.array(self.estimators_features_)[idx])):
-            encoding[:, i] = estimator.predict(X[:, feats])
-            if self.verbose > 1 and i % 20 == 0:
-                print("Encoding. Done %d/%d" % (i + 1, code_size), end="\r",
-                      file=sys.stderr)
+        # n_samples = X.shape[0]
+        # code_size = self.code_size_ if self.oob_score else self.n_estimators
+        # encoding = np.empty((n_samples, code_size))
+        #
+        # for i, (estimator, feats) in enumerate(
+        #         zip(np.array(self.estimators_)[idx],
+        #             np.array(self.estimators_features_)[idx])):
+        #     encoding[:, i] = estimator.predict(X[:, feats])
+        #     if self.verbose > 1 and i % 20 == 0:
+        #         print("Encoding. Done %d/%d" % (i + 1, code_size), end="\r",
+        #               file=sys.stderr)
+
+        encoding = jl.Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
+            jl.delayed(_predict_single_estimator)(estimator, X[:, feats])
+            for estimator, feats in zip(
+                np.array(self.estimators_)[idx],
+                np.array(self.estimators_features_)[idx]))
+
+        encoding = np.array(encoding).T
         return encoding
 
     def predict(self, X, classifier=None, code_size=None):

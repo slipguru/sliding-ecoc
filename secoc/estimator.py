@@ -65,7 +65,7 @@ def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
     estimators_splits = []
 
     for i in range(n_estimators):
-        if verbose > 1:
+        if verbose > 2:
             print("Building estimator %d of %d for this parallel run (total %d)..." %
                   (i + 1, n_estimators, total_n_estimators))
 
@@ -602,6 +602,10 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
             predictions[mask, i] = estimator.predict(X[mask][:, features])
 
             oob_score[i] = accuracy_score(split[mask], predictions[mask, i])
+
+            if self.verbose > 1 and i % 20 == 0:
+                print("Encoding. Done %d/%d" % (i + 1, self.n_estimators),
+                      end="\r", file=sys.stderr)
 
         # self.oob_decision_function_ = oob_decision_function
         self.prediction_ = predictions

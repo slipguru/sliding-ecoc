@@ -4,28 +4,27 @@ from __future__ import division, print_function
 import itertools
 import numbers
 import numpy as np
-import sys
-import warnings
 
-from sklearn.base import ClassifierMixin
-from sklearn.base import MetaEstimatorMixin
-from sklearn.ensemble.bagging import _generate_indices, MAX_INT
-from sklearn.ensemble.bagging import BaseBagging
+from sklearn.base import ClassifierMixin, TransformerMixin
+from sklearn.ensemble.bagging import _generate_indices, MAX_INT, BaseBagging
 from sklearn.ensemble.base import _partition_estimators
 from sklearn.externals import joblib as jl
 from sklearn.metrics import accuracy_score
-from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.utils import check_random_state, check_X_y, column_or_1d
-from sklearn.utils import indices_to_mask
+from sklearn.utils import indices_to_mask, check_array
 from sklearn.utils.fixes import bincount
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import check_is_fitted
 from sklearn.utils.validation import has_fit_parameter
 
 
-def _predict_single_estimator(estimator, X):
-    return estimator.predict(X)
+def _predict_single_estimator(estimator, features, X):
+    return estimator.predict(X[:, features])
+
+
+def _predict_proba_single_estimator(estimator, features, X):
+    return estimator.predict_proba(X[:, features])[:, 1]
 
 
 def _generate_bagging_indices(random_state_features, random_state_samples,
@@ -137,7 +136,7 @@ def random_binarizer(y):
     return reduce(np.logical_or, [y == x for x in xx]).astype(int)
 
 
-class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
+class SlidingECOC(BaseBagging, TransformerMixin):
     """A SlidingECOC classifier.
 
     A SlidingECOC classifier is an ensemble meta-estimator specifically
@@ -367,7 +366,7 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         elif not isinstance(max_samples, (numbers.Integral, np.integer)):
             max_samples = int(max_samples * X.shape[0])
 
-        if not (0 < max_samples <= X.shape[0]):
+        if not 0 < max_samples <= X.shape[0]:
             raise ValueError("max_samples must be in (0, n_samples]")
 
         # Store validated integer row sampling value
@@ -380,7 +379,7 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
             max_features = int(self.max_features * self.window_size)
 
         if (self.bootstrap_features and max_features <= 0) or \
-                not (0 < max_features <= self.window_size):
+                not 0 < max_features <= self.window_size:
             raise ValueError("max_features must be in (0, window_size] if not"
                              " bootstrap_features.")
 
@@ -401,11 +400,11 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         #     del self.oob_score_
 
         # if not self.warm_start or len(self.estimators_) == 0:
-        if len(self.estimators_) == 0:
-            # Free allocated memory, if any
-            self.estimators_ = []
-            self.estimators_features_ = []
-            self._estimators_samples = []
+        # if len(self.estimators_) == 0:  # TODO think about warm_start or adding estimators
+        # Free allocated memory, if any
+        self.estimators_ = []
+        self.estimators_features_ = []
+        self._estimators_samples = []
 
         n_more_estimators = self.n_estimators - len(self.estimators_)
 
@@ -536,8 +535,6 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         #     self.estimator_features_.extend(features)
         #     self.estimator_splits_.extend(y_binary_splits)
 
-        self.X_train_encoding_ = self.encode(X)
-        self.y_train_ = y
         return self
 
     @property
@@ -545,59 +542,59 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         """The subset of drawn samples for each base estimator."""
         return self._estimators_samples
 
-    def encode(self, X):
-        """Encode the initial features."""
+    def transform(self, X, code_size=None):
+        """Transform the data X according to the fitted base model.
+
+        Parameters
+        ----------
+        X: {array-like}, shape (n_samples, n_features)
+            Data matrix to be transformed by the model
+
+        Returns
+        -------
+        embedding : array, shape (n_samples, code_size)
+            Transformed data
+        """
         check_is_fitted(self, 'estimators_')
+        # Check data
+        X = check_array(X, accept_sparse=['csr', 'csc'])
+
+        if self.n_features_ != X.shape[1]:
+            raise ValueError("Number of features of the model must "
+                             "match the input. Model n_features is {0} and "
+                             "input n_features is {1}."
+                             "".format(self.n_features_, X.shape[1]))
 
         if self.oob_score:
-            idx = np.argsort(self.oob_score_)[::-1][:self.code_size_]
+            idx = np.argsort(self.oob_score_)[::-1]
+            idx = idx[:code_size or self.code_size_]
         else:
             idx = Ellipsis  # get everyone
 
-        # n_samples = X.shape[0]
-        # code_size = self.code_size_ if self.oob_score else self.n_estimators
-        # encoding = np.empty((n_samples, code_size))
-        #
-        # for i, (estimator, feats) in enumerate(
-        #         zip(np.array(self.estimators_)[idx],
-        #             np.array(self.estimators_features_)[idx])):
-        #     encoding[:, i] = estimator.predict(X[:, feats])
-        #     if self.verbose > 1 and i % 20 == 0:
-        #         print("Encoding. Done %d/%d" % (i + 1, code_size), end="\r",
-        #               file=sys.stderr)
-
         encoding = jl.Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
-            jl.delayed(_predict_single_estimator)(estimator, X[:, feats])
+            jl.delayed(_predict_single_estimator)(estimator, feats, X)
             for estimator, feats in zip(
                 np.array(self.estimators_)[idx],
                 np.array(self.estimators_features_)[idx]))
 
         encoding = np.array(encoding).T
+
+        # # Parallel loop
+        # n_jobs, n_estimators, starts = _partition_estimators(self.n_estimators,
+        #                                                      self.n_jobs)
+        #
+        # all_proba = jl.Parallel(n_jobs=n_jobs, verbose=self.verbose)(
+        #     jl.delayed(_parallel_predict_proba)(
+        #         self.estimators_[starts[i]:starts[i + 1]],
+        #         self.estimators_features_[starts[i]:starts[i + 1]],
+        #         X,
+        #         self.n_classes_)
+        #     for i in range(n_jobs))
+        #
+        # # Reduce
+        # proba = sum(all_proba) / self.n_estimators
+
         return encoding
-
-    def predict(self, X, classifier=None, code_size=None):
-        """Predict multi-class targets using underlying estimators.
-
-        Parameters
-        ----------
-        X : (sparse) array-like, shape = [n_samples, n_features]
-            Data.
-
-        Returns
-        -------
-        y : numpy array of shape [n_samples]
-            Predicted multi-class targets.
-        """
-        encoding = self.encode(X)
-
-        if code_size is None:
-            code_size = self.code_size_
-
-        if classifier is None:
-            classifier = KNeighborsClassifier()
-        knn = classifier.fit(
-            self.X_train_encoding_[:, :code_size], self.y_train_)
-        return knn.predict(encoding[:, :code_size])
 
     def _set_oob_score(self, X, y):
         n_samples = y.shape[0]
@@ -643,6 +640,49 @@ class SlidingECOC(BaseBagging, ClassifierMixin, MetaEstimatorMixin):
         self.classes_, y = np.unique(y, return_inverse=True)
         self.n_classes_ = len(self.classes_)
         return y
+
+
+class SlidingECOCProba(SlidingECOC):
+
+    def transform(self, X, code_size=None):
+        """Transform the data X according to the fitted base model.
+
+        Parameters
+        ----------
+        X: {array-like}, shape (n_samples, n_features)
+            Data matrix to be transformed by the model
+
+        Returns
+        -------
+        embedding : array, shape (n_samples, code_size)
+            Transformed data
+        """
+        check_is_fitted(self, 'estimators_')
+        # Check data
+        X = check_array(X, accept_sparse=['csr', 'csc'])
+
+        if self.n_features_ != X.shape[1]:
+            raise ValueError("Number of features of the model must "
+                             "match the input. Model n_features is {0} and "
+                             "input n_features is {1}."
+                             "".format(self.n_features_, X.shape[1]))
+
+        if self.oob_score:
+            idx = np.argsort(self.oob_score_)[::-1]
+            idx = idx[:code_size or self.code_size_]
+        else:
+            idx = Ellipsis  # get everyone
+
+        encoding = jl.Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
+            jl.delayed(_predict_proba_single_estimator)(estimator, feats, X)
+            for estimator, feats in zip(
+                np.array(self.estimators_)[idx],
+                np.array(self.estimators_features_)[idx]))
+
+        # encoding = np.array(reduce(lambda x,y:np.hstack((x,y)), encoding))
+        encoding = np.array(encoding).T
+
+        return encoding
 
 
 def _predict_score_single_estimator(estimator, X, samples, split,

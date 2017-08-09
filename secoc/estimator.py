@@ -224,6 +224,11 @@ class SlidingECOC(BaseBagging, TransformerMixin):
     verbose : int, optional (default=0)
         Controls the verbosity of the building process.
 
+    method : 'standard' or 'proba'
+        Method to generate final encoding. 'standard' means that the encoding
+        has only 0 or 1. 'proba' means that it's the probability to be 1, so
+        the encoding has float numbers in [0,1].
+
      Attributes
     ----------
     base_estimator_ : estimator
@@ -272,6 +277,7 @@ class SlidingECOC(BaseBagging, TransformerMixin):
                  stride=1,
                  single_seed_features=False,
                  single_seed_samples=False,
+                 method='standard',
                  code_size='auto'):
 
         super(SlidingECOC, self).__init__(
@@ -293,6 +299,7 @@ class SlidingECOC(BaseBagging, TransformerMixin):
         self.n_estimators_window = n_estimators_window
         self.single_seed_features = single_seed_features
         self.single_seed_samples = single_seed_samples
+        self.method = method
 
     def _fit(self, X, y, max_samples=None, max_depth=None, sample_weight=None):
         """Build an ensemble of estimators from the training
@@ -571,8 +578,16 @@ class SlidingECOC(BaseBagging, TransformerMixin):
         else:
             idx = Ellipsis  # get everyone
 
+        if self.method == 'standard':
+            transformer = _predict_single_estimator
+        elif self.method == 'proba':
+            transformer = _predict_proba_single_estimator
+        else:
+            raise ValueError("Method must be 'standard' or 'proba'. "
+                             "Got %s instead." % self.method)
+
         encoding = jl.Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
-            jl.delayed(_predict_single_estimator)(estimator, feats, X)
+            jl.delayed(transformer)(estimator, feats, X)
             for estimator, feats in zip(
                 np.array(self.estimators_)[idx],
                 np.array(self.estimators_features_)[idx]))
@@ -640,49 +655,6 @@ class SlidingECOC(BaseBagging, TransformerMixin):
         self.classes_, y = np.unique(y, return_inverse=True)
         self.n_classes_ = len(self.classes_)
         return y
-
-
-class SlidingECOCProba(SlidingECOC):
-
-    def transform(self, X, code_size=None):
-        """Transform the data X according to the fitted base model.
-
-        Parameters
-        ----------
-        X: {array-like}, shape (n_samples, n_features)
-            Data matrix to be transformed by the model
-
-        Returns
-        -------
-        embedding : array, shape (n_samples, code_size)
-            Transformed data
-        """
-        check_is_fitted(self, 'estimators_')
-        # Check data
-        X = check_array(X, accept_sparse=['csr', 'csc'])
-
-        if self.n_features_ != X.shape[1]:
-            raise ValueError("Number of features of the model must "
-                             "match the input. Model n_features is {0} and "
-                             "input n_features is {1}."
-                             "".format(self.n_features_, X.shape[1]))
-
-        if self.oob_score:
-            idx = np.argsort(self.oob_score_)[::-1]
-            idx = idx[:code_size or self.code_size_]
-        else:
-            idx = Ellipsis  # get everyone
-
-        encoding = jl.Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
-            jl.delayed(_predict_proba_single_estimator)(estimator, feats, X)
-            for estimator, feats in zip(
-                np.array(self.estimators_)[idx],
-                np.array(self.estimators_features_)[idx]))
-
-        # encoding = np.array(reduce(lambda x,y:np.hstack((x,y)), encoding))
-        encoding = np.array(encoding).T
-
-        return encoding
 
 
 def _predict_score_single_estimator(estimator, X, samples, split,

@@ -13,7 +13,7 @@ from sklearn.metrics import accuracy_score
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.utils import check_random_state, check_X_y, column_or_1d
 from sklearn.utils import indices_to_mask, check_array
-from sklearn.utils.fixes import bincount
+from numpy import bincount
 from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import check_is_fitted
 from sklearn.utils.validation import has_fit_parameter

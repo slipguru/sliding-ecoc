@@ -268,6 +268,7 @@ class SlidingECOC(BaseBagging, TransformerMixin):
                  bootstrap_features=False,
                  oob_score=False,
                  n_jobs=1,
+                 n_jobs_predict=1,
                  random_state=None,
                  verbose=0,
 
@@ -300,6 +301,7 @@ class SlidingECOC(BaseBagging, TransformerMixin):
         self.single_seed_features = single_seed_features
         self.single_seed_samples = single_seed_samples
         self.method = method
+        self.n_jobs_predict = n_jobs_predict
 
     def _fit(self, X, y, max_samples=None, max_depth=None, sample_weight=None):
         """Build an ensemble of estimators from the training
@@ -353,6 +355,7 @@ class SlidingECOC(BaseBagging, TransformerMixin):
             self.n_windows_ = int(np.ceil((
                 self.n_features_ - self.window_size) / self.stride) + 1)
         else:
+            # it is independent from window_size
             self.n_windows_ = len(range(0, self.n_features_, self.stride))
 
         if self.n_estimators is None:
@@ -586,7 +589,7 @@ class SlidingECOC(BaseBagging, TransformerMixin):
             raise ValueError("Method must be 'standard' or 'proba'. "
                              "Got %s instead." % self.method)
 
-        encoding = jl.Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
+        encoding = jl.Parallel(n_jobs=self.n_jobs_predict, verbose=self.verbose)(
             jl.delayed(transformer)(estimator, feats, X)
             for estimator, feats in zip(
                 np.array(self.estimators_)[idx],
@@ -632,9 +635,9 @@ class SlidingECOC(BaseBagging, TransformerMixin):
         #         print("Encoding. Done %d/%d" % (i + 1, self.n_estimators),
         #               end="\r", file=sys.stderr)
         predictions, oob_score = zip(
-            *jl.Parallel(n_jobs=self.n_jobs, verbose=self.verbose)(
+            *jl.Parallel(n_jobs=self.n_jobs_predict, verbose=self.verbose)(
                 jl.delayed(_predict_score_single_estimator)(
-                    estimator, X[:, features], samples, split, n_samples)
+                    estimator, X, features, samples, split, n_samples)
                 for estimator, samples, split, features in zip(
                     self.estimators_, self.estimators_samples_,
                     self.estimators_splits_, self.estimators_features_)))
@@ -657,14 +660,14 @@ class SlidingECOC(BaseBagging, TransformerMixin):
         return y
 
 
-def _predict_score_single_estimator(estimator, X, samples, split,
+def _predict_score_single_estimator(estimator, X, features, samples, split,
                                     n_samples):
     # Create mask for OOB samples
     samples = indices_to_mask(samples, n_samples)
-    mask = ~samples
+    unsampled = ~samples
 
     predictions = np.empty(n_samples, dtype=np.int8)
-    predictions[mask] = estimator.predict(X[mask])
+    predictions[unsampled] = estimator.predict(X[np.ix_(unsampled, features)])
 
-    oob_score = accuracy_score(split[mask], predictions[mask])
+    oob_score = accuracy_score(split[unsampled], predictions[unsampled])
     return predictions, oob_score

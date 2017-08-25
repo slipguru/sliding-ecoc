@@ -31,13 +31,19 @@ def _generate_bagging_indices(random_state_features, random_state_samples,
                               random_state_max_features,
                               bootstrap_features, bootstrap_samples,
                               n_features, n_samples,
-                              max_features, max_samples):
+                              max_features, max_samples,
+                              draw_max_features=False):
     """Randomly draw feature and sample indices."""
     # Draw indices
+    if draw_max_features:
+        max_feats = max_features
+    else:
+        max_feats = check_random_state(random_state_max_features).randint(
+            1, max_features + 1)
+
     feature_indices = _generate_indices(
         check_random_state(random_state_features), bootstrap_features,
-        n_features,
-        check_random_state(random_state_max_features).randint(1, max_features + 1))
+        n_features, max_feats)
     sample_indices = _generate_indices(
         check_random_state(random_state_samples), bootstrap_samples,
         n_samples, max_samples)
@@ -48,7 +54,9 @@ def _generate_bagging_indices(random_state_features, random_state_samples,
 def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
                                seeds_features, seeds_samples, seeds_max_features,
                                total_n_estimators, verbose,
-                               start_index, circular_features=False):
+                               start_index,
+                               draw_max_features=False,
+                               circular_features=False):
     """Private function used to build a batch of estimators within a job."""
     # Retrieve settings
     n_samples, n_features = X.shape
@@ -90,7 +98,8 @@ def _parallel_build_estimators(n_estimators, ensemble, X, y, sample_weight,
             random_state_features, random_state, random_state_max_features,
             bootstrap_features, bootstrap,
             n_features_window, n_samples,
-            max_features_window, max_samples)
+            max_features_window, max_samples,
+            draw_max_features=draw_max_features)
 
         features += start_index[i]
 
@@ -275,6 +284,7 @@ class SlidingECOC(BaseBagging, TransformerMixin):
                  window_size=5,
                  n_estimators_window=10,
                  circular_features=False,
+                 draw_max_features=False,
                  stride=1,
                  single_seed_features=False,
                  single_seed_samples=False,
@@ -302,6 +312,7 @@ class SlidingECOC(BaseBagging, TransformerMixin):
         self.single_seed_samples = single_seed_samples
         self.method = method
         self.n_jobs_predict = n_jobs_predict
+        self.draw_max_features = draw_max_features
 
     def _fit(self, X, y, max_samples=None, max_depth=None, sample_weight=None):
         """Build an ensemble of estimators from the training
@@ -498,7 +509,8 @@ class SlidingECOC(BaseBagging, TransformerMixin):
                 total_n_estimators,
                 start_index=list(itertools.islice(start_index, n_estimators[i])),
                 verbose=self.verbose,
-                circular_features=self.circular_features)
+                circular_features=self.circular_features,
+                draw_max_features=self.draw_max_features)
             for i in range(n_jobs))
 
         # Reduce
